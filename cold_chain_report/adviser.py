@@ -43,10 +43,10 @@ class WarehouseAdviceReport:
 
 
 DOOR_OPENS_THRESHOLDS = {
-    "高温库": 12,
-    "中温库": 8,
-    "低温库": 5,
-    "恒温库": 10,
+    "高温库": 60,
+    "中温库": 40,
+    "低温库": 20,
+    "恒温库": 50,
 }
 
 DEFROSTS_PER_DAY_NORMAL = {
@@ -63,8 +63,8 @@ COMPRESSOR_STARTS_THRESHOLD = {
     "恒温库": 8,
 }
 
-SHORT_CYCLE_RATIO_THRESHOLD = 0.08
-TEMP_COMPLIANCE_THRESHOLD = 0.95
+SHORT_CYCLE_RATIO_THRESHOLD = 0.15
+TEMP_COMPLIANCE_THRESHOLD = 0.90
 
 
 def _advice_door_open_frequency(
@@ -153,11 +153,11 @@ def _advice_compressor_short_cycle(
     short_ratio = analysis.short_cycle_ratio
     avg_power = analysis.avg_daily_power_kwh
 
-    extra_loss_factor = min(0.25, short_ratio * 1.2)
+    extra_loss_factor = min(0.25, short_ratio * 1.0)
     savings_low = avg_power * analysis.total_days * extra_loss_factor * 0.5
     savings_high = avg_power * analysis.total_days * extra_loss_factor * 1.0
 
-    priority = "critical" if short_ratio > 0.2 else "high"
+    priority = "critical" if short_ratio > 0.25 else "high"
 
     return EnergySavingAdvice(
         warehouse_id=analysis.warehouse_id,
@@ -300,12 +300,19 @@ def _advice_temp_compliance(
     if analysis.temp_compliance_rate >= TEMP_COMPLIANCE_THRESHOLD:
         return None
 
+    if analysis.temp_compliance_rate >= 0.75:
+        priority = "medium"
+    elif analysis.temp_compliance_rate >= 0.50:
+        priority = "high"
+    else:
+        priority = "critical"
+
     return EnergySavingAdvice(
         warehouse_id=analysis.warehouse_id,
         warehouse_name=analysis.warehouse_name,
         category="temperature_quality",
-        priority="critical",
-        issue_description=f"温度达标率 {analysis.temp_compliance_rate*100:.1f}% 低于 95% 要求，累计温超标 {analysis.temp_overshoot_degree_hours:.1f} °C·h",
+        priority=priority,
+        issue_description=f"温度达标率 {analysis.temp_compliance_rate*100:.1f}% 低于 90% 要求，累计温超标 {analysis.temp_overshoot_degree_hours:.1f} °C·h",
         recommendation="优先排查温度不达标的根因：设备故障、负荷过大、化霜异常或围护结构漏冷",
         evidence=f"温超标度数 {analysis.temp_overshoot_degree_hours:.1f} °C·h，平均温度 {analysis.avg_temp:.2f}°C，目标 {analysis.target_temp}°C",
         estimated_savings_low_kwh=0,

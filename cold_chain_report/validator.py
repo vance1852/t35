@@ -57,8 +57,8 @@ def detect_missing_hours(df: pd.DataFrame) -> Tuple[List[pd.Timestamp], int]:
         return [], 0
     df_sorted = df.sort_values("timestamp")
     start = df_sorted["timestamp"].min().floor("h")
-    end = df_sorted["timestamp"].max().ceil("h")
-    expected = pd.date_range(start=start, end=end, freq="h", inclusive="left")
+    end_raw = df_sorted["timestamp"].max().floor("h") + pd.Timedelta(hours=1)
+    expected = pd.date_range(start=start, end=end_raw, freq="h", inclusive="left")
     actual_set = set(pd.to_datetime(df_sorted["timestamp"]).dt.floor("h"))
     missing = [ts for ts in expected if ts not in actual_set]
     expected_count = len(expected)

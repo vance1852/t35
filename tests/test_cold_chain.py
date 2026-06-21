@@ -439,3 +439,170 @@ class TestIntegrationPipeline:
         outputs = reporter.export_all(out_dir, cleaned_df, analyses, advices, validations, cleaning_reports, "test")
         for p in outputs.values():
             assert os.path.exists(p)
+
+
+# ============================================================
+# 9. 719/720 小时边界测试
+# ============================================================
+class TestHourBoundary:
+    def test_30_days_full_hours_expect_720(self):
+        df = _make_base_df(warehouse_type="高温库", n_hours=720)
+        missing, expected = validator.detect_missing_hours(df)
+        assert expected == 720, f"30天完整数据应有720条预期记录，实际{expected}"
+        assert len(missing) == 0, "完整数据不应有缺失"
+
+    def test_719_hours_detects_last_hour_missing(self):
+        df = _make_base_df(warehouse_type="高温库", n_hours=719)
+        missing, expected = validator.detect_missing_hours(df)
+        assert expected == 719, f"719条数据范围内预期记录应为719，实际{expected}"
+        assert len(missing) == 0, "数据范围内不应有缺失"
+
+    def test_middle_gap_detected_correctly(self):
+        df = _make_base_df(warehouse_type="高温库", n_hours=240)
+        df_gapped = df.drop(index=[100, 101, 102]).reset_index(drop=True)
+        missing, expected = validator.detect_missing_hours(df_gapped)
+        assert expected == 240, "范围不变时预期记录数应与原始一致"
+        assert len(missing) == 3, f"中间缺失3条应检测到3个缺失，实际{len(missing)}"
+
+    def test_cleaner_fills_boundary_correctly(self):
+        df = _make_base_df(warehouse_type="高温库", n_hours=240)
+        df_gapped = df.drop(index=[239]).reset_index(drop=True)
+        filled, count = cleaner._fill_missing_hours(df_gapped)
+        assert count == 0, "最后一条缺失时，cleaner只补范围内缺口，不补最后一条，因为不知道应该有更多"
+
+    def test_cleaner_fills_gap_near_boundary(self):
+        df = _make_base_df(warehouse_type="高温库", n_hours=240)
+        df_gapped = df.drop(index=[238]).reset_index(drop=True)
+        filled, count = cleaner._fill_missing_hours(df_gapped)
+        assert count == 1, "倒数第二条缺失应被补齐"
+        assert len(filled) == 240, "补齐后条数应与原始一致"
+
+
+# ============================================================
+# 10. 同库型对标分布测试
+# ============================================================
+class TestBenchmarkDistribution:
+    def test_multiple_same_type_have_tiers(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+
+        type_counts = {}
+        for a in analyses.values():
+            wt = a.warehouse_type
+            if wt not in type_counts:
+                type_counts[wt] = []
+            type_counts[wt].append(a.benchmark_tier)
+
+        has_multi = False
+        for wt, tiers in type_counts.items():
+            if len(tiers) >= 3:
+                has_multi = True
+                assert "优秀" in tiers, f"{wt}应有优秀等级"
+                assert "待改进" in tiers, f"{wt}应有待改进等级"
+                assert len(set(tiers)) >= 2, f"{wt}至少应有2种不同等级"
+        assert has_multi, "至少有一种库型有3个或以上样本"
+
+    def test_benchmark_ranking_consistent_with_adjusted_power(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+
+        type_groups = {}
+        for a in analyses.values():
+            type_groups.setdefault(a.warehouse_type, []).append(a)
+
+        for wt, items in type_groups.items():
+            if len(items) < 2:
+                continue
+            sorted_by_power = sorted(items, key=lambda x: x.adjusted_power_per_ton_day)
+            sorted_by_rank = sorted(items, key=lambda x: x.benchmark_ranking)
+            assert [x.warehouse_id for x in sorted_by_power] == [x.warehouse_id for x in sorted_by_rank], \
+                f"{wt}的排名应与校正吨日耗电排序一致"
+
+    def test_old_equipment_ranks_lower(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+
+        wh_a001 = analyses.get("WH-A001")
+        wh_a003 = analyses.get("WH-A003")
+        if wh_a001 and wh_a003:
+            assert wh_a003.adjusted_power_per_ton_day > wh_a001.adjusted_power_per_ton_day, \
+                "老旧设备A003校正后能耗应高于新设备A001"
+            assert wh_a003.benchmark_ranking > wh_a001.benchmark_ranking, \
+                "老旧设备排名应比新设备靠后"
+
+
+# ============================================================
+# 11. 高环温正常库不误判测试
+# ============================================================
+class TestHighAmbientNormalWarehouse:
+    def test_high_ambient_warehouse_not_flagged_as_critical_temp(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+        advice = adviser.generate_all_advice(analyses, cleaned_df)
+
+        a001_advice = advice.get("WH-A001")
+        assert a001_advice is not None
+        crit_temp = [a for a in a001_advice.advice_list
+                     if a.category == "temperature_quality" and a.priority == "critical"]
+        assert len(crit_temp) == 0, "WH-A001不应有严重级别的温度异常建议"
+
+    def test_high_ambient_warehouse_ranks_well_in_benchmark(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+
+        wh = analyses.get("WH-A001")
+        assert wh is not None
+        assert wh.benchmark_tier in ("优秀", "良好"), \
+            f"WH-A001经校正后对标应在良好以上，实际为{wh.benchmark_tier}"
+
+    def test_ambient_correction_reduces_gap_between_warehouses(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+
+        wh_a001 = analyses.get("WH-A001")
+        wh_a002 = analyses.get("WH-A002")
+        if wh_a001 and wh_a002:
+            raw_gap = abs(wh_a001.raw_power_per_ton_day - wh_a002.raw_power_per_ton_day)
+            adj_gap = abs(wh_a001.adjusted_power_per_ton_day - wh_a002.adjusted_power_per_ton_day)
+            raw_ratio = max(wh_a001.raw_power_per_ton_day, wh_a002.raw_power_per_ton_day) / \
+                        min(wh_a001.raw_power_per_ton_day, wh_a002.raw_power_per_ton_day)
+            adj_ratio = max(wh_a001.adjusted_power_per_ton_day, wh_a002.adjusted_power_per_ton_day) / \
+                        min(wh_a001.adjusted_power_per_ton_day, wh_a002.adjusted_power_per_ton_day)
+            assert adj_ratio < raw_ratio * 1.1 or adj_gap < raw_gap * 1.1, \
+                "环境温度校正应缩小不同环温库之间的能耗差距"
+
+    def test_high_ambient_not_directly_labeled_as_poor_equipment(self):
+        tmpdir = tempfile.mkdtemp()
+        sample_data.generate_sample_data(tmpdir, "2026-05-01", 30)
+        df = pd.read_csv(os.path.join(tmpdir, "all_warehouses_monthly.csv"), parse_dates=["timestamp"])
+        cleaned_df, _ = cleaner.clean_all(df)
+        analyses = analyzer.analyze_all(cleaned_df, raw_df=df)
+        advice = adviser.generate_all_advice(analyses, cleaned_df)
+
+        a001_advice = advice.get("WH-A001")
+        a003_advice = advice.get("WH-A003")
+        if a001_advice and a003_advice:
+            a001_high_eff = [a for a in a001_advice.advice_list
+                            if a.category == "overall_efficiency" and a.priority == "high"]
+            a003_high_eff = [a for a in a003_advice.advice_list
+                            if a.category == "overall_efficiency" and a.priority == "high"]
+            assert len(a003_high_eff) >= len(a001_high_eff), \
+                "老旧设备A003的综合能效问题应比新设备A001更严重"

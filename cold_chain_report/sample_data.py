@@ -20,28 +20,75 @@ COLUMNS = [
 WAREHOUSE_CONFIGS = [
     {
         "warehouse_id": "WH-A001",
-        "warehouse_name": "高温蔬果冷库",
+        "warehouse_name": "高温蔬果冷库（新设备）",
         "warehouse_type": "高温库",
         "target_temp": 4.0,
         "temp_tolerance": 1.5,
-        "base_power": 25.0,
+        "base_power": 40.0,
+        "cooling_efficiency": 0.9,
         "ambient_base": 32.0,
         "ambient_amp": 8.0,
-        "normal_door_count_range": (2, 10),
+        "normal_door_count_range": (1, 4),
         "defrost_hours": [6, 14, 22],
         "inventory_range": (15000, 25000),
         "anomaly_type": "HIGH_AMBIENT_NORMAL_OP",
     },
     {
-        "warehouse_id": "WH-B002",
-        "warehouse_name": "中温肉类冷库",
+        "warehouse_id": "WH-A002",
+        "warehouse_name": "高温果蔬冷库（普通设备）",
+        "warehouse_type": "高温库",
+        "target_temp": 4.0,
+        "temp_tolerance": 1.5,
+        "base_power": 45.0,
+        "cooling_efficiency": 0.7,
+        "ambient_base": 29.0,
+        "ambient_amp": 7.0,
+        "normal_door_count_range": (1, 5),
+        "defrost_hours": [6, 14, 22],
+        "inventory_range": (12000, 22000),
+        "anomaly_type": "NORMAL",
+    },
+    {
+        "warehouse_id": "WH-A003",
+        "warehouse_name": "高温鲜品冷库（老旧设备）",
+        "warehouse_type": "高温库",
+        "target_temp": 4.0,
+        "temp_tolerance": 1.5,
+        "base_power": 55.0,
+        "cooling_efficiency": 0.55,
+        "ambient_base": 27.0,
+        "ambient_amp": 6.0,
+        "normal_door_count_range": (2, 6),
+        "defrost_hours": [3, 9, 15, 21],
+        "inventory_range": (10000, 20000),
+        "anomaly_type": "INEFFICIENT_EQUIPMENT",
+    },
+    {
+        "warehouse_id": "WH-B001",
+        "warehouse_name": "中温肉品冷库（运行良好）",
         "warehouse_type": "中温库",
         "target_temp": -18.0,
         "temp_tolerance": 2.0,
-        "base_power": 60.0,
+        "base_power": 70.0,
+        "cooling_efficiency": 0.8,
         "ambient_base": 26.0,
         "ambient_amp": 6.0,
-        "normal_door_count_range": (1, 6),
+        "normal_door_count_range": (0, 3),
+        "defrost_hours": [4, 12, 20],
+        "inventory_range": (20000, 35000),
+        "anomaly_type": "NORMAL",
+    },
+    {
+        "warehouse_id": "WH-B002",
+        "warehouse_name": "中温肉类冷库（短循环严重）",
+        "warehouse_type": "中温库",
+        "target_temp": -18.0,
+        "temp_tolerance": 2.0,
+        "base_power": 80.0,
+        "cooling_efficiency": 0.75,
+        "ambient_base": 26.0,
+        "ambient_amp": 6.0,
+        "normal_door_count_range": (0, 3),
         "defrost_hours": [4, 12, 20],
         "inventory_range": (20000, 35000),
         "anomaly_type": "SHORT_CYCLE_COMPRESSOR",
@@ -52,10 +99,11 @@ WAREHOUSE_CONFIGS = [
         "warehouse_type": "低温库",
         "target_temp": -30.0,
         "temp_tolerance": 2.5,
-        "base_power": 120.0,
+        "base_power": 150.0,
+        "cooling_efficiency": 0.85,
         "ambient_base": 28.0,
         "ambient_amp": 7.0,
-        "normal_door_count_range": (0, 4),
+        "normal_door_count_range": (0, 2),
         "defrost_hours": [8, 20],
         "inventory_range": (10000, 18000),
         "anomaly_type": "NORMAL",
@@ -66,10 +114,11 @@ WAREHOUSE_CONFIGS = [
         "warehouse_type": "恒温库",
         "target_temp": 0.0,
         "temp_tolerance": 1.0,
-        "base_power": 35.0,
+        "base_power": 45.0,
+        "cooling_efficiency": 0.78,
         "ambient_base": 25.0,
         "ambient_amp": 5.0,
-        "normal_door_count_range": (3, 12),
+        "normal_door_count_range": (1, 5),
         "defrost_hours": [2, 10, 18],
         "inventory_range": (8000, 15000),
         "anomaly_type": "NORMAL",
@@ -91,10 +140,16 @@ def _ambient_temp_at(hour: int, base: float, amp: float) -> float:
 
 def _generate_warehouse_data(cfg: dict, timestamps: pd.DatetimeIndex) -> pd.DataFrame:
     rows = []
-    compressor_on = False
+    compressor_on = True
     meter_reading = 100000.0 + random.uniform(0, 5000)
     inventory_level = random.uniform(*cfg["inventory_range"])
     short_cycle_countdown = 0
+
+    cooling_eff = cfg.get("cooling_efficiency", 0.7)
+    if cfg.get("anomaly_type") == "INEFFICIENT_EQUIPMENT":
+        cooling_eff *= 0.7
+
+    current_temp = cfg["target_temp"] + 0.5
 
     for ts in timestamps:
         hour = ts.hour
@@ -102,24 +157,31 @@ def _generate_warehouse_data(cfg: dict, timestamps: pd.DatetimeIndex) -> pd.Data
         inventory_level += np.random.normal(0, 120)
         inventory_level = float(np.clip(inventory_level, *cfg["inventory_range"]))
 
-        heat_gain_factor = max(0.3, (ambient - cfg["target_temp"]) / 30.0)
+        temp_diff = max(0.1, ambient - cfg["target_temp"])
+        heat_gain_per_hour = temp_diff * 0.018
+        cooling_per_hour = cfg["base_power"] * 0.075 * cooling_eff
+
         target_temp = cfg["target_temp"]
         if hour >= 22 or hour < 6:
             target_temp += 1.5
 
+        hysteresis_high = target_temp + cfg["temp_tolerance"] * 0.6
+        hysteresis_low = target_temp - cfg["temp_tolerance"] * 0.4
+
         if cfg["anomaly_type"] == "SHORT_CYCLE_COMPRESSOR":
             if short_cycle_countdown > 0:
                 short_cycle_countdown -= 1
-                compressor_on = not compressor_on if random.random() < 0.8 else compressor_on
-            elif random.random() < 0.35:
-                short_cycle_countdown = random.randint(4, 10)
-                compressor_on = True
-            if random.random() < 0.12 and short_cycle_countdown == 0:
+                if random.random() < 0.7:
+                    compressor_on = not compressor_on
+            elif random.random() < 0.2:
+                short_cycle_countdown = random.randint(2, 6)
                 compressor_on = not compressor_on
+            else:
+                if not compressor_on and current_temp > hysteresis_high:
+                    compressor_on = True
+                elif compressor_on and current_temp < hysteresis_low:
+                    compressor_on = False
         else:
-            hysteresis_high = target_temp + cfg["temp_tolerance"] * 0.7
-            hysteresis_low = target_temp - cfg["temp_tolerance"] * 0.5
-            current_temp = rows[-1]["temp_celsius"] if rows else target_temp + 1.0
             if not compressor_on and current_temp > hysteresis_high:
                 compressor_on = True
             elif compressor_on and current_temp < hysteresis_low:
@@ -128,41 +190,39 @@ def _generate_warehouse_data(cfg: dict, timestamps: pd.DatetimeIndex) -> pd.Data
         door_count = random.randint(*cfg["normal_door_count_range"])
         if 8 <= hour <= 18:
             door_count = int(door_count * 1.5)
-        if random.random() < 0.04:
-            door_count += random.randint(8, 20)
+        if random.random() < 0.02:
+            door_count += random.randint(3, 8)
 
         defrost = 1 if hour in cfg["defrost_hours"] else 0
-        if random.random() < 0.01:
+        if random.random() < 0.005:
             defrost = 1
 
         temp_delta = 0.0
         if compressor_on:
-            temp_delta -= 0.8 * (1.0 + heat_gain_factor * 0.3)
-        else:
-            temp_delta += 0.4 * heat_gain_factor
+            temp_delta -= cooling_per_hour
+        temp_delta += heat_gain_per_hour
         if defrost:
-            temp_delta += 2.5
-        temp_delta += door_count * 0.08
-        temp_delta += np.random.normal(0, 0.2)
+            temp_delta += 0.4
+        temp_delta += door_count * 0.02
+        temp_delta += np.random.normal(0, 0.04)
 
-        prev_temp = rows[-1]["temp_celsius"] if rows else target_temp + 0.5
-        current_temp = prev_temp + temp_delta
+        current_temp += temp_delta
         current_temp = float(np.clip(
             current_temp,
-            cfg["target_temp"] - cfg["temp_tolerance"] * 3,
-            cfg["target_temp"] + cfg["temp_tolerance"] * 4
+            cfg["target_temp"] - cfg["temp_tolerance"] * 4,
+            cfg["target_temp"] + cfg["temp_tolerance"] * 5
         ))
 
         power = 0.0
         if compressor_on:
-            compressor_power = cfg["base_power"] * (1.0 + heat_gain_factor * 0.4)
-            compressor_power *= random.uniform(0.85, 1.15)
+            compressor_power = cfg["base_power"] * (1.0 + heat_gain_per_hour * 0.8)
+            compressor_power *= random.uniform(0.92, 1.08)
             power += compressor_power
         if defrost:
-            power += cfg["base_power"] * 0.3 * random.uniform(0.9, 1.1)
-        power += door_count * cfg["base_power"] * 0.01
+            power += cfg["base_power"] * 0.25 * random.uniform(0.9, 1.1)
+        power += door_count * cfg["base_power"] * 0.006
         power = round(max(0.0, power), 2)
-        meter_reading += power + random.uniform(-0.1, 0.1)
+        meter_reading += power + random.uniform(-0.05, 0.05)
 
         rows.append({
             "warehouse_id": cfg["warehouse_id"],

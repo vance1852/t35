@@ -81,10 +81,10 @@ BASELINE_AMBIENT_BY_TYPE = {
 }
 
 REFERENCE_POWER_PER_TON_DAY = {
-    "高温库": 6.0,
-    "中温库": 12.0,
-    "低温库": 22.0,
-    "恒温库": 8.0,
+    "高温库": 12.0,
+    "中温库": 18.0,
+    "低温库": 32.0,
+    "恒温库": 20.0,
 }
 
 
@@ -144,15 +144,18 @@ def _adjust_for_conditions(
     baseline_ambient: float,
     warehouse_type: str,
 ) -> Tuple[float, float, float]:
-    ambient_delta = actual_ambient - baseline_ambient
-    ambient_factor = 1.0 + ambient_delta * 0.015
+    target_temp, _ = _get_target_config(warehouse_type)
+
+    baseline_delta = max(1.0, baseline_ambient - target_temp)
+    actual_delta = max(1.0, actual_ambient - target_temp)
+    ambient_factor = actual_delta / baseline_delta
+
+    if warehouse_type in ("低温库", "中温库"):
+        ambient_factor = ambient_factor ** 1.1
 
     inventory_factor = 1.0 / max(0.5, actual_inventory_ratio)
 
     adjusted = raw_per_ton_day / ambient_factor / inventory_factor
-
-    if warehouse_type in ("低温库", "中温库"):
-        adjusted = raw_per_ton_day / (ambient_factor ** 1.2) / inventory_factor
 
     return adjusted, ambient_factor, inventory_factor
 
@@ -190,11 +193,8 @@ def analyze_warehouse(df: pd.DataFrame, raw_df_for_short_cycle: pd.DataFrame = N
 
     avg_ambient = float(df_sorted["ambient_temp"].mean())
     avg_inventory = float(df_sorted["inventory_kg"].mean())
-
-    inv_range = WAREHOUSE_TYPE_TEMP_RANGES
-    _ = inv_range
-    max_inv_capacity = avg_inventory / 0.7 if avg_inventory > 0 else 1.0
-    inventory_ratio = min(1.0, avg_inventory / max_inv_capacity)
+    p95_inventory = float(df_sorted["inventory_kg"].quantile(0.95))
+    inventory_ratio = min(1.0, avg_inventory / max(1.0, p95_inventory))
 
     tons = avg_inventory / 1000.0 if avg_inventory > 0 else 0.1
     power_per_ton_day = (total_power / total_days) / tons if (total_days > 0 and tons > 0) else 0.0
